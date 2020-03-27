@@ -1,0 +1,148 @@
+###
+### Deadwood metatranscriptome assembly pipeline
+###
+
+### Trimmomatic v0.36 adaptors trimming, leading, trailing
+for file in *merged_all_R1.fastq.gz
+do
+  sample=${file%%merged_all_R1.fastq.gz}	
+  echo "trimmomatic-0.36.jar PE -phred33 ${sample}merged_all_R1.fastq.gz ${sample}merged_all_R2.fastq.gz ${sample}R1.tr.pe.fq ${sample}R1.tr.se.fq ${sample}R2.tr.pe.fq ${sample}R2.tr.se.fq ILLUMINACLIP:/usr/local/share/adapters/TruSeq3-PE.fa:2:30:10 LEADING:3 TRAILING:3"
+done > trim_all.sh
+cat trim_all.sh | ~/parallel-20150722/src/parallel
+
+mkdir trimmed
+mv *.tr.* trimmed
+cd trimmed
+
+### interleave PE and delete trimmed PE
+for file in *_R1.tr.pe.fq
+do
+   sample=${file%%_R1.tr.pe.fq}
+   echo "interleave-reads.py ${sample}_R1.tr.pe.fq ${sample}_R2.tr.pe.fq -o ${sample}.tr.pe.fq && rm -v ${sample}_R1.tr.pe.fq && rm -v ${sample}_R2.tr.pe.fq"
+done > interleave.sh
+cat interleave.sh | ~/parallel-20150722/src/parallel
+
+### quality filtering of PE and SE and deleting them
+for file in *.fq
+do
+  newfile=${file%%.fq}		
+  echo "fastq_quality_filter -i ${file} -Q33 -q 30 -p 50 -o ${newfile}.qc.fq && rm -v ${file}"
+done > qual_filter_all.sh
+cat qual_filter_all.sh | ~/parallel-20150722/src/parallel
+
+mkdir filtered
+mv *.qc.fq filtered
+cd filtered/
+
+### trim short sequences SE and PE and delete them
+for file in *.qc.fq
+do
+  echo "read_fastq -i ${file} -e base_33 | grab -e 'SEQ_LEN >= 50' | write_fastq -x -o ${file}.cut && rm -v ${file}"
+done > remove_short_all.sh
+cat remove_short_all.sh | ~/parallel-20150722/src/parallel
+
+### BBTools using bbduk for rRNA filtering
+for file in *.tr.pe.qc.fq.cut
+do
+ sample=${file%%.tr.pe.qc.fq.cut}
+ echo "bbduk.sh ordered k=31 ref=ribokmers.fa.gz ow=true in=${file} out=${sample}_NO_rRNA.pe.fq outm=${sample}_rRNA.pe.fq"
+done > remove_rrna_command_all.sh
+cat remove_rrna_command_all.sh | ~/parallel-20150722/src/parallel
+
+for file in *.tr.se.qc.fq.cut
+do
+ sample=${file%%.tr.se.qc.fq.cut}
+ echo "bbduk.sh ordered k=31 ref=ribokmers.fa.gz ow=true in=${file} out=${sample}_NO_rRNA.se.fq outm=${sample}_rRNA.se.fq"
+done > remove_rrna_command_SE_all.sh
+cat remove_rrna_command_SE_all.sh | ~/parallel-20150722/src/parallel
+
+### extract PE from interleaved
+for file in *.pe.fq
+do
+   echo "extract-paired-reads.py ${file}"
+done > extract_command_all.sh
+cat extract_command_all.sh | ~/parallel-20150722/src/parallel
+
+### rename PE and SE, both are filtered for quality and rRNA
+for file in *.pe
+do
+   sample=${file%%.pe.fq.pe}
+   mv  ${file} ${sample}.pe.qc.fq
+done
+
+for file in *.se
+do
+   sample=${file%%.pe.fq.se}
+   mv  ${file} ${sample}.se.qc.fq
+done
+
+## merge SE Trimmomatic R1 and R2 together
+for file in *_R1_NO_rRNA.se.fq
+do
+   sample=${file%%_R1_NO_rRNA.se.fq}
+   echo "cat ${file} ${sample}_R2_NO_rRNA.se.fq > ${sample}.se.qc.fq"
+done > merge_se_all.sh
+cat merge_se_all.sh | ~/parallel-20150722/src/parallel
+
+### merge SE from extraction and from Trimmomatic
+for file in *_NO_rRNA.se.qc.fq
+do
+   sample=${file%%_NO_rRNA.se.qc.fq}
+   echo "cat ${file} ${sample}.se.qc.fq > ${sample}_complete.se.qc.fq"
+done > merge_se2_all.sh
+cat merge_se2_all.sh | ~/parallel-20150722/src/parallel
+
+### final assembly ###
+### split PE
+for file in *.pe.qc.fq
+do
+   echo "split-paired-reads.py ${file}"
+done > split_command_nodiginorm.sh
+cat split_command_nodiginorm.sh | ~/parallel-20150722/src/parallel
+
+### merge before megahit
+cat *.1 > all.pe.qc.fq.1
+cat *.2 > all.pe.qc.fq.2
+cat *.se.qc.fq > all.se.qc.fq
+
+### megahit assembly no diginorm
+megahit-1.1.3 -1 all.pe.qc.fq.1 -2 all.pe.qc.fq.2 -r all.se.qc.fq -o all.assembly.nodiginorm.fa --verbose -t 40
+
+### indexing
+bwa-0.7.17 index -a bwtsw ./final.contigs.fa
+
+#### CAZy annotation using dbCAN V7 and genecalling from MG-RAST
+### run dbCAN in parallel on parsed genes into seperate files
+pyfasta split -n 50 mg_rast_genecalled_mt.faa
+for file in mg_rast_genecalled_mt.*.faa
+do
+   echo "python /home/lab141/tools/dbCAN2/run_dbcan.py ./${file} protein --db_dir /home/lab141/tools/dbCAN2/ -t hmmer --out_dir ./${file}_out --hmm_cpu 1 --dia_cpu 1"
+done > dbcan.sh
+cat dbcan.sh | ~/parallel-20150722/src/parallel
+
+### CAZy annotation processing
+### rename after parent folder
+find . -name "mg_rast_genecalled_mt.*.faa_outhmmer.out" -type f -exec cp {} ./all_hmmer \;
+
+### rename
+for file in *.faa_outhmmer.out
+do
+   sample=${file%%.faa_outhmmer.out}
+   mv ${file} alldbCAN_${sample}_hmmer.txt
+done
+
+### remove first row with header
+for file in alldbCAN_*_hmmer.txt
+do
+   tail -n +2 ${file} > ./removed/${file}
+done
+
+### stat for each part of dbCAN
+for file in alldbCAN_*_hmmer.txt
+do
+   wc -l ${file} >> row_count.txt
+done
+
+#### KO annotation using FOAM and genecalling from MG-RAST
+/home/lab141/hmmer-3.2.1/src/hmmsearch --tblout mt_genes_foam_final.txt --noali --cpu 5 -E 1e-10 ./foam_db/FOAM-hmm_rel1a.hmm mg_rast_genecalled_mt.fasta
+
