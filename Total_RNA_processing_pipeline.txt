@@ -1,0 +1,137 @@
+###
+### Deadwood total RNA processing
+###
+
+### Trimmomatic Illumina adpters
+for file in *_L002_R1_001.fastq.gz
+do
+  sample=${file%%_L002_R1_001.fastq.gz}
+  echo "trimmomatic-0.36.jar PE -phred33 ${sample}_L002_R1_001.fastq.gz ${sample}_L002_R2_001.fastq.gz ${sample}_R1.tr.pe.fq ${sample}_R1.tr.se.fq ${sample}_R2.tr.pe.fq ${sample}_R2.tr.se.fq ILLUMINACLIP:/usr/local/share/adapters/TruSeq3-PE.fa:2:30:10 LEADING:3 TRAILING:3"
+done > trim.sh
+cat trim.sh | ~/parallel-20180822/src/parallel
+
+mkdir trimmed \
+&& mv *.tr.* trimmed \
+&& cd trimmed
+
+### Interleave the remaining paired-end files
+for file in *_R1.tr.pe.fq
+do
+   sample=${file%%_R1.tr.pe.fq}
+   echo "interleave-reads.py ${sample}_R1.tr.pe.fq ${sample}_R2.tr.pe.fq -o ${sample}.tr.pe.fq"
+done > interleave.sh
+cat interleave.sh | ~/parallel-20180822/src/parallel
+
+rm -rv *_R1.tr.pe.fq *_R2.tr.pe.fq
+
+### remove empty files
+
+find . -size 0 -delete
+
+### Quality filtering
+
+for file in *.fq
+do
+  newfile=${file%%.fq}
+  echo "fastq_quality_filter -i ${file} -Q33 -q 30 -p 50 -o ${newfile}.qc.fq"
+done > qual_filter.sh
+cat qual_filter.sh | ~/parallel-20180822/src/parallel
+
+mkdir filtered \
+&& mv *.qc.fq filtered \
+&& cd filtered/
+
+### Size filtering and seq_name connecting R1 and R2 annotation to the rest of the seq @name.
+for file in *.qc.fq
+do
+  echo "sed 's/ /_/' ${file} | bioawk -c fastx 'length("'$seq'") > 40{print "'"@"'" "'$name'" ; print "'$seq'"; print "'"+"'" ; print "'$qual'"}' > ${file}.cut"
+done > remove_short.sh
+cat remove_short.sh | ~/parallel-20180822/src/parallel
+find . -size 0 -delete
+
+mkdir cut \
+&& mv *.cut cut
+
+### Making size profiles
+
+mkdir sizes
+
+for i in *.fq
+  do echo "bioawk -c fastx '{print length("'$seq'")}' $i |sort -n | uniq -c | awk '{print "'$2'" "'"\t"'" "'$1'"}' > sizes/${i%%.qc.fq}.sizes"
+done > get_sizes_parallel.txt
+cat get_sizes_parallel.txt | ~/parallel-20180822/src/parallel
+
+cd cut \
+&& mkdir sizes
+
+for i in *.cut
+ do echo "bioawk -c fastx '{print length("'$seq'")}' $i |sort -n | uniq -c | awk '{print "'$2'" "'"\t"'" "'$1'"}' > sizes/${i%%.qc.fq.cut}.cut.sizes"
+done > get_sizes_parallel.txt
+cat get_sizes_parallel.txt | ~/parallel-20180822/src/parallel
+
+### Joining orphan paired-end and PE reads
+
+mkdir concatenated
+
+for i in 7_S18 31_S19 55_S22 44_S20 106_S1 6_S17 69_S23 49_S21 116_S3 110_S2
+do
+echo "cat ${i}_R1.tr.se.qc.fq.cut ${i}_R2.tr.se.qc.fq.cut ${i}.tr.pe.qc.fq.cut > ./concatenated/${i}.tr.se_pe.fq.cut"
+done > concatBash.sh
+cat concatBash.sh | ~/parallel-20180822/src/parallel
+
+cd concatenated
+
+### Getting the counts of filtered sequences
+
+for i in *.cut
+ do echo "echo $i; bioawk -c fastx '{print "'$name'"}' ${i} | wc -l "
+done > get_counts_bash
+cat get_counts_bash | ~/parallel-20180822/src/parallel
+
+mkdir sizes
+
+for i in *.cut
+ do echo "bioawk -c fastx '{print length("'$seq'")}' $i |sort -n | uniq -c | awk '{print "'$2'" "'"\t"'" "'$1'"}' > sizes/${i%%.qc.fq.cut}.cut.sizes"
+done > get_sizes_parallel.txt
+cat get_sizes_parallel.txt | ~/parallel-20180822/src/parallel
+
+mkdir fastas
+
+for i in *.cut
+ do echo "bioawk -c fastx '{print "'">"'" "'$name'"; print "'$seq'"}' $i > fastas/${i%%.fq.cut}.fasta"
+done > fasta_convert.txt
+cat fasta_convert.txt | ~/parallel-20180822/src/parallel
+
+cd fastas
+
+### BBTools using bbduk for rRNA filtering
+for file in *.tr.se_pe.fasta
+do
+ sample=${file%%.tr.se_pe.fasta}
+ bbduk.sh ordered k=31 ref=./riboKmers.fa.gz ow=true in=${file} out=${sample}_other.fasta outm=${sample}_rRNA.fasta
+done
+
+### subset of large samples 
+for i in 6_S17 106_S1 55_S22 116_S3
+do
+echo "seqtk sample -s 200 ${i}_rRNA.fasta 1000000 > ./${i}_rRNA_subs.fasta"
+done > subset.sh
+cat subset.sh | ~/parallel-20180822/src/parallel
+
+mkdir blast4CREST_out
+
+### BLAST against SILVA 128 provided with CREST tool
+for i in 7 31 55 44 106 6 69 49 116 110
+do 
+/mnt/DATA01/vojta/ncbi-blast-2.7.1+/bin/blastn -task megablast -query ${i}_rRNA.fasta -db /home/lab141/tools/CREST/LCAClassifier/parts/flatdb/silvamod/silvamod128.fasta -num_alignments 50 -num_threads 60 -outfmt 5 -out blast4CREST_out/${i%%_rRNA.fasta}_blastout_50hts_silva128forCREST.xml
+done
+
+### CREST classify
+
+mkdir assignments_crest
+
+for i in 7 31 55 44 106 6 69 49 116 110
+do 
+classify -o assignments_crest/${i}_total_rna_assignment -r 5 ${i}_blastout_50hts_silva128forCREST.xml 
+done
+
