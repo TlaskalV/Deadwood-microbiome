@@ -1,0 +1,243 @@
+###
+### Deadwood metagenome assembly pipeline
+###
+
+### Trimmomatic v0.36 adaptors trimming, leading, trailing
+for file in *merged_R1.fastq.gz
+do
+  sample=${file%%merged_R1.fastq.gz}	
+  echo "trimmomatic-0.36.jar PE -phred33 ${sample}merged_R1.fastq.gz ${sample}merged_R2.fastq.gz ${sample}R1.tr.pe.fq ${sample}R1.tr.se.fq ${sample}R2.tr.pe.fq ${sample}R2.tr.se.fq ILLUMINACLIP:/usr/local/share/adapters/TruSeq3-PE.fa:2:30:10 LEADING:3 TRAILING:3"
+done > trim.sh
+cat trim.sh | ~/parallel-20150722/src/parallel
+
+### interleave PE
+for file in *_R1.tr.pe.fq
+do
+   sample=${file%%_R1.tr.pe.fq}
+   echo "interleave-reads.py ${sample}_R1.tr.pe.fq ${sample}_R2.tr.pe.fq -o ${sample}.tr.pe.fq"
+done > interleave.sh
+cat interleave.sh | ~/parallel-20150722/src/parallel
+
+### quality filter SE and PE
+for file in *.fq
+do
+	newfile=${file%%.fq}
+	echo "fastq_quality_filter -i ${file} -Q33 -q 30 -p 50 -o ${newfile}.qc.fq"
+done > qual_filter.sh
+cat qual_filter.sh | ~/parallel-20150722/src/parallel
+
+### trim short sequences SE and PE
+for file in *.qc.fq
+do
+  echo "read_fastq -i ${file} -e base_33 | grab -e 'SEQ_LEN >= 50' | write_fastq -x -o ${file}.cut"
+done > remove_short.sh
+cat remove_short.sh | ~/parallel-20150722/src/parallel
+
+### extract PE
+for file in *tr.pe.qc.fq.cut
+do
+   echo "extract-paired-reads.py ${file}"
+done > extract_command.sh
+cat extract_command.sh | ~/parallel-20150722/src/parallel
+
+### remove empty files
+find . -size 0 -delete
+
+### rename PE and SE, both are filtered for quality
+for file in *.pe
+do
+   sample=${file%%.tr.pe.qc.fq.cut.pe}
+   mv  ${file} ${sample}.pe.qc.fq
+done
+
+for file in *.se
+do
+   sample=${file%%.tr.pe.qc.fq.cut.se}
+   mv  ${file} ${sample}.se.qc.fq
+done
+
+### merge SE Trimmomatic R1 and R2 together
+for file in *_R1.tr.se.qc.fq.cut
+do
+   sample=${file%%_R1.tr.se.qc.fq.cut}
+   echo "cat ${file} ${sample}_R2.tr.se.qc.fq.cut > ${sample}.se.trim.qc.fq"
+done > merge_se.sh
+cat merge_se.sh | ~/parallel-20150722/src/parallel
+
+### merge SE from extraction and from Trimmomatic
+for file in *.se.qc.fq
+do
+   sample=${file%%.se.qc.fq}
+   echo "cat ${file} ${sample}.se.trim.qc.fq > ${sample}_complete.se.qc.fq"
+done > merge_se2.sh
+cat merge_se2.sh | ~/parallel-20150722/src/parallel
+
+### split PE
+for file in *.pe.qc.fq
+do
+   echo "split-paired-reads.py ${file}"
+done > split_command.sh
+cat split_command.sh | ~/parallel-20150722/src/parallel
+
+### merge before assembly
+### mixed assembly from all samples
+cat *complete.se.qc.fq > all.se.qc.nodigi.fq
+cat *fq.1 > all.pe.qc.nodigi.fq.1
+cat *fq.2 > all.pe.qc.nodigi.fq.2
+
+### final assembly
+megahit_v1.1.3_LINUX_CPUONLY_x86_64-bin/megahit -1 all.pe.qc.nodigi.fq.1.gz -2 all.pe.qc.nodigi.fq.2.gz -r all.se.qc.nodigi.fq.gz -o all.assembly.fa --verbose -t 20 -m 300000000000
+
+### indexing
+bwa index -a bwtsw ./final.contigs.fa
+
+# mapping PE with joint output: 
+# mapping SE
+# merge PE and SE BAM
+# sorting
+
+### mapping against all assembly
+### mapping group 5 against all assembly
+for i in 58 101 111 113 115; do
+	echo "bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/5_merged/${i}.pe.qc.fq.1.gz /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/5_merged/${i}.pe.qc.fq.2.gz > ${i}.pe.mapped.sam \
+	&& bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/5_merged/${i}_complete.se.qc.fq.gz > ${i}.se.mapped.sam \
+	&& samtools1.3 view -buS ${i}.pe.mapped.sam -o ${i}.pe.mapped.bam \
+	&& samtools1.3 view -buS ${i}.se.mapped.sam -o ${i}.se.mapped.bam \
+	&& samtools1.3 merge ${i}.merged.bam ${i}.pe.mapped.bam ${i}.se.mapped.bam \
+	&& samtools1.3 sort ${i}.merged.bam -o ${i}_merged_sorted.bam"
+done > map5.sh
+cat map5.sh | ~/parallel-20150722/src/parallel
+
+###
+# mapping group 4 against all assembly
+
+for i in 3 28 39 57 84; do
+	echo "bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/4_merged/${i}.pe.qc.fq.1.gz /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/4_merged/${i}.pe.qc.fq.2.gz > ${i}.pe.mapped.sam \
+	&& bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/4_merged/${i}_complete.se.qc.fq.gz > ${i}.se.mapped.sam \
+	&& samtools1.3 view -buS ${i}.pe.mapped.sam -o ${i}.pe.mapped.bam \
+	&& samtools1.3 view -buS ${i}.se.mapped.sam -o ${i}.se.mapped.bam \
+	&& samtools1.3 merge ${i}.merged.bam ${i}.pe.mapped.bam ${i}.se.mapped.bam \
+	&& samtools1.3 sort ${i}.merged.bam -o ${i}_merged_sorted.bam"
+done > map4.sh
+cat map4.sh | ~/parallel-20150722/src/parallel
+
+###
+# mapping group 3 against all assembly
+
+for i in 31 49 55 69 106; do
+	echo "bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/3_merged/${i}.pe.qc.fq.1.gz /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/3_merged/${i}.pe.qc.fq.2.gz > ${i}.pe.mapped.sam \
+	&& bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/3_merged/${i}_complete.se.qc.fq.gz > ${i}.se.mapped.sam \
+	&& samtools1.3 view -buS ${i}.pe.mapped.sam -o ${i}.pe.mapped.bam \
+	&& samtools1.3 view -buS ${i}.se.mapped.sam -o ${i}.se.mapped.bam \
+	&& samtools1.3 merge ${i}.merged.bam ${i}.pe.mapped.bam ${i}.se.mapped.bam \
+	&& samtools1.3 sort ${i}.merged.bam -o ${i}_merged_sorted.bam"
+done > map3.sh
+cat map3.sh | ~/parallel-20150722/src/parallel
+
+###
+# mapping group 2 against all assembly
+
+for i in 110 116 44 6 7; do
+	echo "bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/2_merged/${i}.pe.qc.fq.1.gz /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/2_merged/${i}.pe.qc.fq.2.gz > ${i}.pe.mapped.sam \
+	&& bwa-0.7.17 mem -M -t 10 ../final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/2_merged/${i}_complete.se.qc.fq.gz > ${i}.se.mapped.sam \
+	&& samtools1.3 view -buS ${i}.pe.mapped.sam -o ${i}.pe.mapped.bam \
+	&& samtools1.3 view -buS ${i}.se.mapped.sam -o ${i}.se.mapped.bam \
+	&& samtools1.3 merge ${i}.merged.bam ${i}.pe.mapped.bam ${i}.se.mapped.bam \
+	&& samtools1.3 sort ${i}.merged.bam -o ${i}_merged_sorted.bam"
+done > map2.sh
+cat map2.sh | ~/parallel-20150722/src/parallel
+
+###
+# mapping group 1 against all assembly
+
+for i in 130, 131, 132, 133, 134; do
+	echo "bwa-0.7.17 mem -M -t 10 /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/all_merged/final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/1_merged/${i}.pe.qc.fq.1.gz /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/1_merged/${i}.pe.qc.fq.2.gz > ${i}.pe.mapped.sam \
+	&& bwa-0.7.17 mem -M -t 10 /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/all_merged/final.contigs.fa /mnt/DATA01/vojta_metagenome/merged_lanes/merged_all_gunzipped/assembly_no_diginorm/filtered/1_merged/${i}_complete.se.qc.fq.gz > ${i}.se.mapped.sam \
+	&& samtools1.3 view -buS ${i}.pe.mapped.sam -o ${i}.pe.mapped.bam \
+	&& samtools1.3 view -buS ${i}.se.mapped.sam -o ${i}.se.mapped.bam \
+	&& samtools1.3 merge ${i}.merged.bam ${i}.pe.mapped.bam ${i}.se.mapped.bam \
+	&& samtools1.3 sort ${i}.merged.bam -o ${i}_merged_sorted.bam"
+done > map133.sh
+cat map133.sh | ~/parallel-20150722/src/parallel
+
+### indexing bam files
+for file in *.bam
+do
+   echo "samtools1.3 index ${file} ${file}.bai"
+done > indexing.sh
+cat indexing.sh | ~/parallel-20150722/src/parallel
+
+### binning of all assembly and QC of bins
+# min 2000 contig legth
+# based on R cumulative fuction 2000 min contig length gives more precise bins
+metabat2 -i final.contigs.fa -a final.contigs.fa.depth.txt -o ./bins_2000 -v -m 2000 -t 20
+checkm lineage_wf -f ./checkm_2000/checkm_2000.txt -t 5 -x fa ./metabat_2000_more_bins/ ./checkm_2000/
+
+#### CAZy annotation using dbCAN V7 and genecalling from MG-RAST
+/home/lab141/hmmer-3.2.1/src/hmmsearch --tblout ./mg_genes_db_final.txt --noali --cpu 4 -E 1e-10 /home/lab141/tools/run_dbcan-master/db/dbCAN.txt ./mg_rast_genecalling.faa
+
+#### KO annotation using FOAM and genecalling from MG-RAST
+for file in mg_rast_genecalling.*.faa
+do
+   output=${file%%.faa}
+   echo "/home/lab141/hmmer-3.2.1/src/hmmsearch --tblout ${output}.txt --noali --cpu 2 -E 1e-10 /mnt/DATA01/vojta/foam_run/foam_db/FOAM-hmm_rel1a.hmm ${file}"
+done > foam.sh
+cat foam.sh | ~/parallel-20180822/src/parallel
+
+#### CAZy annotation using dbCAN V7 and genecalling from refined bacterial bins
+### Prokka genecalling in bins
+for i in bins_2000.*.filtered.filtered.fa; do
+	b=${i%%.filtered.filtered.fa}
+	/home/lab141/tools/prokka/bin/prokka --kingdom Bacteria --mincontiglen 10 --cpus 30 --force --rnammer --outdir ./"$b"_prokka --prefix "$b" ./"$i"
+done
+
+### copy
+find . -name "*.faa" -type f -exec cp {} ./all_bins_genes \;
+
+### CAZy annotation using predicted genes
+for file in bins_2000.*.faa
+do
+   python /home/lab141/tools/dbCAN2/run_dbcan.py ./${file} protein --db_dir /home/lab141/tools/dbCAN2/ -t hmmer --out_dir ./${file}_out --hmm_cpu 1 --dia_cpu 1
+done
+
+### rename folders
+for f in *.faa_out ; do
+b=${f%%.faa_out}
+mv -- "$f" "$b" ; done
+
+### rename hmmer output
+while read -rd $'\0' f; do 
+  d="${f%/*}"; p="${d/\//_}";
+  mv -- "$f" "${d}/${p}_${f##*/}"
+done < <(find -type f -name '*hmmer.out' -printf '%P\0')
+
+### copy recursive
+find . -name "*_hmmer.out" -type f -exec cp {} ./ \;
+
+### prefix correction
+for file in *_hmmer.out
+do
+   mv ${file} ${file/bins_2000./bin_}
+done
+
+for file in bin_*_hmmer.out
+do
+   output=${file%%_hmmer.out}_hmmer.txt
+   tail -n +2 ${file} > ${output}
+done
+
+### add filename to first column
+for i in *_hmmer.txt; do nawk '{print FILENAME"\t"$0}' $i > $i.bk; mv $i.bk $i; done
+
+cat *_hmmer.txt > all_dbCAN_mags.txt
+for i in *.txt; do wc -l ${i} >> newfile.txt; done
+
+### insert "bin" to the first header
+for i in *_hmmer.out; do
+output=${i%%_hmmer.out}
+awk -v row=1 -v col=1 -v new_value="bin" ' 
+BEGIN { FS = OFS = "\t" }
+NR == row {$col = new_value}
+{print}
+' $i > $output;
+done
