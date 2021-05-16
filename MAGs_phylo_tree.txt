@@ -1,0 +1,5 @@
+### phylogenetic tree of MAGs ###
+
+# GToTree command
+# -f and -m options according to the GToTree manual
+./gtotree/bin/GToTree -f fasta_files.txt -H Bacteria -t -L Species,Strain -m genome_to_id_map.tsv -j 4 -G 0.2 -o mags_deadwood_0_2
